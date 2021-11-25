@@ -30,29 +30,27 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 #include "signalsdef.h"
 
 void sigseek(int sig, siginfo_t *siginfo, void *ctx) {
-	ogg_int64_t seek_offset, pcm_tell, target, max;
+	ogg_int64_t seek_offset, pcm_tell, target, pcm_total;
 	seek_offset = siginfo->si_value.sival_int * 48;
 	pcm_tell = op_pcm_tell(chains[current_chain]);
-retry_seek:
 	target = pcm_tell + seek_offset;
+retry_seek:
 	if (target < 0) {
 		if (current_chain > 0) {
 			op_pcm_seek(chains[current_chain], 0);
 			current_chain--;
-			seek_offset = target + pcm_tell + 1;
-			pcm_tell = op_pcm_total(chains[current_chain], -1)-1;
+			target += op_pcm_total(chains[current_chain], -1)-1;
 			goto retry_seek;
 		}
 		target = 0;
-	} else if (target >= (max = op_pcm_total(chains[current_chain], -1))) {
+	} else if (target >= (pcm_total = op_pcm_total(chains[current_chain], -1))) {
 		if (current_chain < chain_count-1) {
 			op_pcm_seek(chains[current_chain], 0);
 			current_chain++;
-			seek_offset = target - max;
-			pcm_tell = 0;
+			target -= pcm_total;
 			goto retry_seek;
 		}
-		target = max-1;
+		target = pcm_total-1;
 	}
 	op_pcm_seek(chains[current_chain], target);
 }
@@ -61,15 +59,13 @@ void sigskip(int sig, siginfo_t *siginfo, void *ctx) {
 	int skip_offset, current_link, target, link_count;
 	skip_offset = siginfo->si_value.sival_int;
 	current_link = op_current_link(chains[current_chain]);
-retry_skip:
 	target = current_link + skip_offset;
-	link_count = op_link_count(chains[current_chain]);
+retry_skip:
 	if (target < 0) {
 		if (current_chain > 0) {
 			op_pcm_seek(chains[current_chain], 0);
 			current_chain--;
-			skip_offset = target + current_link + 1;
-			current_link = op_link_count(chains[current_chain])-1;
+			target += op_link_count(chains[current_chain])-1;
 			goto retry_skip;
 		}
 		target = 0;
@@ -77,8 +73,7 @@ retry_skip:
 		if (current_chain < chain_count-1) {
 			op_pcm_seek(chains[current_chain], 0);
 			current_chain++;
-			skip_offset = target - link_count;
-			current_link = 0;
+			target -= link_count;
 			goto retry_skip;
 		}
 		target = link_count-1;

@@ -19,6 +19,7 @@ poppy_source = files(
 	'poppy.c',
 	'signals.c',
 	'print_meta.c',
+	'pid.c',
 )
 poppy_include = [
 	include_directories('include'),
@@ -26,7 +27,6 @@ poppy_include = [
 ]
 poppy_deps = [
 	cc.find_library('m', required : false),
-	#cc.find_library('pthread', required : false),
 	dependency('threads'),
 	declare_dependency(
 		link_args : '-lportaudio',

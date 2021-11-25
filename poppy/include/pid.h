@@ -19,24 +19,4 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 #pragma once
 
-#include "signalsdef.h"
-
-extern OggOpusFile **chains;
-extern int chain_count;
-extern int current_chain;
-extern opus_int32 gain;
-extern int gain_type;
-extern enum play_mode play_mode;
-
-void print_opus_read_error(int err);
-
-int play_opus(
-	const void *input,
-	void *output,
-	unsigned long frameCount,
-	const PaStreamCallbackTimeInfo *timeInfo,
-	PaStreamCallbackFlags statusFlags,
-	void *userData
-);
-
-void parse_opt(const char *arg);
+void write_pid_file(void);

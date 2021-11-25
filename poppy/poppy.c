@@ -25,10 +25,6 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 #include <string.h>
 
 #include <unistd.h>
-#include <pwd.h>
-#include <sys/stat.h>
-#include <sys/types.h>
-#include <errno.h>
 
 #include <opusfile.h>
 #include <portaudio.h>
@@ -36,9 +32,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 #include "poppy.h"
 #include "signals.h"
 #include "print_meta.h"
-
-const double sample_rate = 48000;
-const double sample_time = 1/sample_rate;
+#include "pid.h"
 
 OggOpusFile **chains = NULL;
 int chain_count = 0;
@@ -46,28 +40,6 @@ int current_chain = 0;
 opus_int32 gain = 0;
 int gain_type = OP_HEADER_GAIN;
 enum play_mode play_mode = playlist;
-
-int gen_sine(
-	const void *input,
-	void *output,
-	unsigned long frameCount,
-	const PaStreamCallbackTimeInfo *timeInfo,
-	PaStreamCallbackFlags statusFlags,
-	void *userData
-) {
-	(void) input;
-	(void) timeInfo;
-	(void) statusFlags;
-	static const double pi = 3.1415926535897932384626433;
-	float *sample = output;
-	double *time = userData;
-	for (int i = 0; i < frameCount; i++) {
-		*time += sample_time;
-		printf("playing %f\n", *time);
-		sample[i] = 0.05 * sin(2*pi*500* *time);
-	}
-	return paContinue;
-}
 
 const char *stropuserror(int err) {
 	static const char *table[] = {
@@ -266,64 +238,6 @@ void open_playlist(int argc, char *argv[]) {
 		chains[current_chain++] = chain;
 	}
 	current_chain = 0;
-}
-
-void xdg_state_home(char *path) {
-	const char *xdgstatehome = getenv("XDG_STATE_HOME");
-	if (xdgstatehome) {
-		sprintf(path, xdgstatehome);
-		return;
-	}
-	const char *home = getenv("HOME");
-	if (!home) {
-		struct passwd *passwd = getpwuid(getuid());
-		home = passwd->pw_dir;
-	}
-	sprintf(path, "%s/.local/state", home);
-	return;
-}
-
-int mkdirp(const char *path, mode_t mode) {
-	int r = mkdir(path, mode);
-	if (r && errno == ENOENT) {
-		char pathcopy[4096] = {0};
-		pathcopy[0] = path[0];
-		for (int i = 1; path[i]; i++) {
-			if (path[i] != '/') {
-				pathcopy[i] = path[i];
-				continue;
-			}
-			pathcopy[i] = '\0';
-			r = mkdir(pathcopy, mode | 0200);
-			perror(pathcopy);
-			if (r && errno != EEXIST) return r;
-			pathcopy[i] = '/';
-		}
-		return mkdir(path, mode);
-	}
-	return r;
-}
-
-void write_pid_file(void) {
-	char path[4096] = {0};
-	xdg_state_home(path);
-	strcat(path, "/poppy");
-	int r = mkdirp(path, 0777);
-	if (r && errno != EEXIST) {
-		fprintf(stderr, "mkdir %s: ", path);
-		perror("");
-		exit(1);
-	}
-	strcat(path, "/pid");
-	FILE *f = fopen(path, "w");
-	if (!f) {
-		fprintf(stderr, "open %s: ", path);
-		perror("");
-		exit(1);
-	}
-	pid_t pid = getpid();
-	fprintf(f, "%d\n", pid);
-	fclose(f);
 }
 
 void exit_pa(void) {

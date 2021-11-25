@@ -25,27 +25,49 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 #include <stdio.h>
 
 #include <unistd.h>
+#include <pwd.h>
 
 #include "signalsdef.h"
 
 void print_help(const char *cmd) {
-	fprintf(stderr, "%s <pid> (stop|pause|play)\n", cmd);
-	fprintf(stderr, "%s <pid> seek [<seconds>]\n", cmd);
-	fprintf(stderr, "%s <pid> skip [<tracks>]\n", cmd);
-	fprintf(stderr, "%s <pid> gain [<dB>]\n", cmd);
-	fprintf(stderr, "%s <pid> gaintype [header|album|track|absolute]\n", cmd);
-	fprintf(stderr, "%s <pid> absgain [<dB>]\n", cmd);
-	fprintf(stderr, "%s <pid> playmode [playlist|repeat|repeatone|single]\n", cmd);
+	fprintf(stderr, "%s (stop|pause|play)\n", cmd);
+	fprintf(stderr, "%s seek [<seconds>]\n", cmd);
+	fprintf(stderr, "%s skip [<tracks>]\n", cmd);
+	fprintf(stderr, "%s gain [<dB>]\n", cmd);
+	fprintf(stderr, "%s gaintype [header|album|track|absolute]\n", cmd);
+	fprintf(stderr, "%s absgain [<dB>]\n", cmd);
+	fprintf(stderr, "%s playmode [playlist|repeat|repeatone|single]\n", cmd);
+}
+
+void xdg_state_home(char *path) {
+	const char *xdgstatehome = getenv("XDG_STATE_HOME");
+	if (xdgstatehome) {
+		sprintf(path, xdgstatehome);
+		return;
+	}
+	const char *home = getenv("HOME");
+	if (!home) {
+		struct passwd *passwd = getpwuid(getuid());
+		home = passwd->pw_dir;
+	}
+	sprintf(path, "%s/.local/state", home);
+	return;
 }
 
 int main(int argc, char *argv[]) {
-	if (argc-1 < 1) {
-		print_help(argv[0]);
+	char path[4096] = {0};
+	xdg_state_home(path);
+	strcat(path, "/poppy/pid");
+	FILE *pidfile = fopen(path, "r");
+	if (!pidfile) {
+		fprintf(stderr, "open %s: ", path);
+		perror("");
 		return -1;
 	}
-	if (argc-1 < 2) {
-		char path[32] = {0};
-		sprintf(path, "/proc/%s/stat", argv[1]);
+	pid_t pid;
+	fscanf(pidfile, "%d", &pid);
+	if (argc-1 < 1) {
+		sprintf(path, "/proc/%d/stat", pid);
 		FILE *stat = fopen(path, "r");
 		if (!stat) {
 			fprintf(stderr, "open %s: ", path);
@@ -57,13 +79,13 @@ int main(int argc, char *argv[]) {
 		fclose(stat);
 		switch (state) {
 		case 'R': case 'S':
-			if (kill(atoi(argv[1]), SIGSTOP) != 0) {
+			if (kill(pid, SIGSTOP) != 0) {
 				perror("kill");
 				return -1;
 			}
 			return 0;
 		case 'T':
-			if (kill(atoi(argv[1]), SIGCONT) != 0) {
+			if (kill(pid, SIGCONT) != 0) {
 				perror("kill");
 				return -1;
 			}
@@ -72,106 +94,106 @@ int main(int argc, char *argv[]) {
 		}
 	}
 	union sigval val;
-	if (!strcmp(argv[2], "stop")) {
-		if (kill(atoi(argv[1]), SIGTERM) != 0) {
+	if (!strcmp(argv[1], "stop")) {
+		if (kill(pid, SIGTERM) != 0) {
 			perror("kill");
 			return -1;
 		}
 		return 0;
 	}
-	if (!strcmp(argv[2], "pause")) {
-		if (kill(atoi(argv[1]), SIGSTOP) != 0) {
+	if (!strcmp(argv[1], "pause")) {
+		if (kill(pid, SIGSTOP) != 0) {
 			perror("kill");
 			return -1;
 		}
 		return 0;
 	}
-	if (!strcmp(argv[2], "play")) {
-		if (kill(atoi(argv[1]), SIGCONT) != 0) {
+	if (!strcmp(argv[1], "play")) {
+		if (kill(pid, SIGCONT) != 0) {
 			perror("kill");
 			return -1;
 		}
 		return 0;
 	}
-	if (!strcmp(argv[2], "seek")) {
-		if (argc-1 < 3) return 0;
-		double offset = strtof(argv[3], NULL);
+	if (!strcmp(argv[1], "seek")) {
+		if (argc-1 < 2) return 0;
+		double offset = strtof(argv[2], NULL);
 		val.sival_int = offset * 1e3;
-		if (sigqueue(atoi(argv[1]), SIGSEEK, val) != 0) {
+		if (sigqueue(pid, SIGSEEK, val) != 0) {
 			perror("sigqueue");
 			return -1;
 		}
 		return 0;
 	}
-	if (!strcmp(argv[2], "skip")) {
+	if (!strcmp(argv[1], "skip")) {
 		val.sival_int = 0;
-		if (argc-1 >= 3) {
-			val.sival_int = strtol(argv[3], NULL, 0);
+		if (argc-1 >= 2) {
+			val.sival_int = strtol(argv[2], NULL, 0);
 		}
-		if (sigqueue(atoi(argv[1]), SIGSKIP, val) != 0) {
+		if (sigqueue(pid, SIGSKIP, val) != 0) {
 			perror("sigqueue");
 			return -1;
 		}
 		return 0;
 	}
-	if (!strcmp(argv[2], "gain")) {
-		if (argc-1 < 3) return 0;
-		float gain = strtof(argv[3], NULL);
+	if (!strcmp(argv[1], "gain")) {
+		if (argc-1 < 2) return 0;
+		float gain = strtof(argv[2], NULL);
 		val.sival_int = gain * 256;
-		if (sigqueue(atoi(argv[1]), SIGGAIN, val) != 0) {
+		if (sigqueue(pid, SIGGAIN, val) != 0) {
 			perror("sigqueue");
 			return -1;
 		}
 		return 0;
 	}
-	if (!strcmp(argv[2], "gaintype")) {
+	if (!strcmp(argv[1], "gaintype")) {
 		val.sival_int =
-			  (argc-1 < 3)                   ? header
-			: (!strcmp(argv[3], "header"))   ? header
-			: (!strcmp(argv[3], "album"))    ? album
-			: (!strcmp(argv[3], "track"))    ? track
-			: (!strcmp(argv[3], "absolute")) ? absolute
-			: (!strcmp(argv[3], "abs"))      ? absolute
+			  (argc-1 < 2)                   ? header
+			: (!strcmp(argv[2], "header"))   ? header
+			: (!strcmp(argv[2], "album"))    ? album
+			: (!strcmp(argv[2], "track"))    ? track
+			: (!strcmp(argv[2], "absolute")) ? absolute
+			: (!strcmp(argv[2], "abs"))      ? absolute
 			: -1;
 		if (val.sival_int < 0) {
 			fputs("header album track absolute\n", stderr);
 			return -1;
 		}
-		if (sigqueue(atoi(argv[1]), SIGGAINTYPE, val) != 0) {
+		if (sigqueue(pid, SIGGAINTYPE, val) != 0) {
 			perror("sigqueue");
 			return -1;
 		}
 		return 0;
 	}
-	if (!strcmp(argv[2], "absgain")) {
+	if (!strcmp(argv[1], "absgain")) {
 		float gain = 0;
 		if (argc-1 >= 3) {
-			gain = strtof(argv[3], NULL);
+			gain = strtof(argv[2], NULL);
 		}
 		val.sival_int = gain * 256;
-		if (sigqueue(atoi(argv[1]), SIGABSGAIN, val) != 0) {
+		if (sigqueue(pid, SIGABSGAIN, val) != 0) {
 			perror("sigqueue");
 			return -1;
 		}
 		return 0;
 	}
-	if (!strcmp(argv[2], "playmode")) {
+	if (!strcmp(argv[1], "playmode")) {
 		val.sival_int =
-			  (argc-1 < 3)                    ? playlist
-			: (!strcmp(argv[3], "playlist"))  ? playlist
-			: (!strcmp(argv[3], "list"))      ? playlist
-			: (!strcmp(argv[3], "repeat"))    ? repeat
-			: (!strcmp(argv[3], "rep"))       ? repeat
-			: (!strcmp(argv[3], "repeatone")) ? repeat_one
-			: (!strcmp(argv[3], "repeat1"))   ? repeat_one
-			: (!strcmp(argv[3], "rep1"))      ? repeat_one
-			: (!strcmp(argv[3], "single"))    ? single
+			  (argc-1 < 2)                    ? playlist
+			: (!strcmp(argv[2], "playlist"))  ? playlist
+			: (!strcmp(argv[2], "list"))      ? playlist
+			: (!strcmp(argv[2], "repeat"))    ? repeat
+			: (!strcmp(argv[2], "rep"))       ? repeat
+			: (!strcmp(argv[2], "repeatone")) ? repeat_one
+			: (!strcmp(argv[2], "repeat1"))   ? repeat_one
+			: (!strcmp(argv[2], "rep1"))      ? repeat_one
+			: (!strcmp(argv[2], "single"))    ? single
 			: -1;
 		if (val.sival_int < 0) {
 			fputs("playlist repeat repeatone single\n", stderr);
 			return -1;
 		}
-		if (sigqueue(atoi(argv[1]), SIGPLAYMODE, val) != 0) {
+		if (sigqueue(pid, SIGPLAYMODE, val) != 0) {
 			perror("sigqueue");
 			return -1;
 		}

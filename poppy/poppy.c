@@ -170,19 +170,16 @@ void print_playback_details(PaStream *stream) {
 		offset /= 48e3;
 		double now = op_pcm_tell(chain)/48e3 - offset;
 		double remaining = length - now;
-		double min, sec, ff;
+		double min, sec;
 		sec = modf(now/60, &min)*60;
-		ff  = modf(sec, &sec)*75;
-		printf("[%.0f:%02.0f:%02.0f/", min, sec, ff);
+		printf("[%02.0f:%05.2f/", min, sec);
 		sec = modf(length/60, &min)*60;
-		ff  = modf(sec, &sec)*75;
-		printf("%.0f:%02.0f:%02.0f/", min, sec, ff);
+		printf("%02.0f:%05.2f/", min, sec);
 		remaining = length - now;
 		sec = modf(remaining/60, &min)*60;
-		ff  = modf(sec, &sec)*75;
-		printf("%.0f:%02.0f:%02.0f]", min, sec, ff);
+		printf("%02.0f:%05.2f]", min, sec);
 		fflush(stdout);
-		Pa_Sleep(10000/75.);
+		Pa_Sleep(10);
 	}
 	if (paerr < 0) {
 		fprintf(stderr, "Pa_IsStreamActive: %d\n", paerr);

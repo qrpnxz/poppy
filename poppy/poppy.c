@@ -79,11 +79,22 @@ chain:
 	if (current_chain >= chain_count) return paComplete;
 	chain = chains[current_chain];
 	op_set_gain_offset(chain, gain_type, gain);
+retry:
 	int pre_link = op_current_link(chain);
 	int ret = op_read_float_stereo(chain, pcm, 2*frameCount);
 	if (ret < 0) {
 		fprintf(stderr, "op_read_float_stereo: %s\n",
 			stropuserror(ret));
+		switch (ret) {
+		case OP_HOLE: case OP_EREAD: case OP_EBADPACKET:
+			goto retry;
+		case OP_EINVAL:
+			ret = op_test_open(chain);
+			fprintf(stderr, "op_test_open: %s\n",
+				stropuserror(ret));
+		default:
+			return paAbort;
+		}
 	}
 	int post_link = op_current_link(chain);
 	ogg_int64_t pcm_tell  = op_pcm_tell(chain);

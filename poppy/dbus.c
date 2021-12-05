@@ -469,7 +469,7 @@ DBusHandlerResult mp2_player_msg(
 			reply_nothing(conn, msg);
 			return DBUS_HANDLER_RESULT_HANDLED;
 		}
-		pa_operation *op = pa_stream_cork(player->stream, 0, NULL, NULL);
+		pa_operation *op = pa_stream_cork(player->stream, 1, NULL, NULL);
 		pa_operation_unref(op);
 		signal_prop_change_one_basic(conn,
 			"org.mpris.MediaPlayer2.Player",

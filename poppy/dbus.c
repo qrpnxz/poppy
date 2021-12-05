@@ -92,6 +92,19 @@ void iter_dict_append_basic(
 	iter_dict_close_entry(dict, &entry, &variant);
 }
 
+void iter_dict_append_callback(
+	DBusMessageIter *dict,
+	const char *key,
+	const char *sig,
+	void (*value_cb)(DBusMessageIter*, void*),
+	void *ud
+) {
+	DBusMessageIter entry, variant;
+	iter_dict_open_entry(dict, &entry, &variant, key, sig);
+	value_cb(&variant, ud);
+	iter_dict_close_entry(dict, &entry, &variant);
+}
+
 void reply_nothing(
 	DBusConnection *conn,
 	DBusMessage *msg
@@ -128,6 +141,27 @@ void signal_prop_change_one_basic(
 	dbus_message_iter_init_append(signal, &iter);
 	iter_init_dict(&iter, &dict);
 	iter_dict_append_basic(&dict, key, type, value);
+	iter_close_dict(&iter, &dict);
+	dbus_message_iter_open_container(&iter,
+		DBUS_TYPE_ARRAY, "s", &array);
+	dbus_message_iter_close_container(&iter, &array);
+	dbus_connection_send(conn, signal, NULL);
+	dbus_message_unref(signal);
+}
+
+void signal_prop_change_one_callback(
+	DBusConnection *conn,
+	const char *interface,
+	const char *key,
+	const char *sig,
+	void (*value_cb)(DBusMessageIter*, void*),
+	void *ud
+) {
+	DBusMessage *signal = signal_prop_change(interface);
+	DBusMessageIter iter, dict, array;
+	dbus_message_iter_init_append(signal, &iter);
+	iter_init_dict(&iter, &dict);
+	iter_dict_append_callback(&dict, key, sig, value_cb, ud);
 	iter_close_dict(&iter, &dict);
 	dbus_message_iter_open_container(&iter,
 		DBUS_TYPE_ARRAY, "s", &array);
@@ -374,11 +408,105 @@ const char *player_playback_status(struct player *player) {
 		: PlaybackPaused;
 }
 
+void mp2_player_prop_get_playback_status(
+	DBusMessageIter *iter,
+	struct player *player
+) {
+	const char *playback_status =
+		player_playback_status(player);
+	dbus_message_iter_append_basic(iter,
+		DBUS_TYPE_STRING, &playback_status);
+}
+
 const char *player_loop_status(struct player *player) {
 	return 
 		(player->play_mode == repeat) ? LoopPlaylist
 		: (player->play_mode == repeat_one) ? LoopTrack
 		: LoopNone;
+}
+
+void mp2_player_prop_get_loop_status(
+	DBusMessageIter *iter,
+	struct player *player
+) {
+	const char *loop_status =
+		player_loop_status(player);
+	dbus_message_iter_append_basic(iter,
+		DBUS_TYPE_STRING, &loop_status);
+}
+
+void mp2_player_prop_get_volume(
+	DBusMessageIter *iter,
+	struct player *player
+) {
+	double volume = pow(10, player->gain / 20);
+	dbus_message_iter_append_basic(iter,
+		DBUS_TYPE_DOUBLE, &volume);
+}
+
+void mp2_player_prop_get_position(
+	DBusMessageIter *iter,
+	struct player *player
+) {
+	struct playlist *pl = &player->pl;
+	track_i *track = pl->track[pl->curr];
+	track_state state = track->state(track);
+	dbus_int64_t position = state.time * 1e6;
+	dbus_message_iter_append_basic(iter,
+		DBUS_TYPE_INT64, &position);
+}
+
+void mp2_player_prop_get_metadata(
+	DBusMessageIter *iter,
+	struct player *player
+) {
+	struct playlist *pl = &player->pl;
+	track_i *track = pl->track[pl->curr];
+	track_meta meta = track->meta(track);
+	dbus_int64_t length = meta.length * 1e6;
+
+	DBusMessageIter dict;
+	iter_init_dict(iter, &dict);
+
+	char buf[] = "/org/mpris/MediaPlayer2/track/??????";
+	snprintf(buf, sizeof buf,
+		"/org/mpris/MediaPlayer2/track/%d", pl->curr);
+	const char *obj = buf;
+	iter_dict_append_basic(&dict,
+		"mpris:trackid", DBUS_TYPE_STRING, &obj);
+
+	iter_dict_append_basic(&dict,
+		"mpris:length", DBUS_TYPE_INT64, &length);
+	
+	if (meta.album) {
+		iter_dict_append_basic(&dict,
+			"xesam:album", DBUS_TYPE_STRING, &meta.album);
+	}
+	
+	if (meta.artist) {
+		DBusMessageIter entry, variant, array;
+		iter_dict_open_entry(&dict, &entry, &variant,
+			"xesam:artist", "as");
+		dbus_message_iter_open_container(&variant,
+			DBUS_TYPE_ARRAY, "s", &array);
+		dbus_message_iter_append_basic(&array,
+			DBUS_TYPE_STRING, &meta.artist);
+		dbus_message_iter_close_container(&variant, &array);
+		iter_dict_close_entry(&dict, &entry, &variant);
+	}
+	
+	if (meta.title) {
+		iter_dict_append_basic(&dict,
+			"xesam:title", DBUS_TYPE_STRING, &meta.title);
+	}
+	
+	if (meta.tracknumber) {
+		dbus_int32_t track_number = atoi(meta.tracknumber);
+		iter_dict_append_basic(&dict,
+			"xesam:trackNumber", DBUS_TYPE_INT32, &track_number);
+	}
+
+	iter_close_dict(iter, &dict);
 }
 
 DBusHandlerResult mp2_player_msg(
@@ -395,6 +523,7 @@ DBusHandlerResult mp2_player_msg(
 		track->seek(track, 0, SEEK_SET);
 		switch (player->play_mode) {
 		case playlist:
+		case single:
 			pl->curr++;
 			if (pl->curr >= pl->size) {
 				pl->curr = 0;
@@ -408,18 +537,22 @@ DBusHandlerResult mp2_player_msg(
 					DBUS_TYPE_STRING, &playback_status
 				);
 			}
+			signal_prop_change_one_callback(conn,
+				"org.mpris.MediaPlayer2.Player",
+				"Metadata", "a{sv}",
+				mp2_player_prop_get_metadata, player
+			);
 			break;
 		case repeat:
 			pl->curr++;
 			pl->curr %= pl->size;
+			signal_prop_change_one_callback(conn,
+				"org.mpris.MediaPlayer2.Player",
+				"Metadata", "a{sv}",
+				mp2_player_prop_get_metadata, player
+			);
 			break;
 		case repeat_one: break;
-		case single:
-			track->seek(track, 0, SEEK_END);
-			pa_operation *op = pa_stream_cork(player->stream,
-				1, NULL, NULL);
-			pa_operation_unref(op);
-			break;
 		}
 		mtx_unlock(&player->lock);
 		reply_nothing(conn, msg);
@@ -433,6 +566,7 @@ DBusHandlerResult mp2_player_msg(
 		track->seek(track, 0, SEEK_SET);
 		switch (player->play_mode) {
 		case playlist:
+		case single:
 			pl->curr--;
 			if (pl->curr < 0) {
 				pl->curr = 0;
@@ -446,18 +580,22 @@ DBusHandlerResult mp2_player_msg(
 					DBUS_TYPE_STRING, &playback_status
 				);
 			}
+			signal_prop_change_one_callback(conn,
+				"org.mpris.MediaPlayer2.Player",
+				"Metadata", "a{sv}",
+				mp2_player_prop_get_metadata, player
+			);
 			break;
 		case repeat:
 			pl->curr--;
 			pl->curr %= pl->size;
+			signal_prop_change_one_callback(conn,
+				"org.mpris.MediaPlayer2.Player",
+				"Metadata", "a{sv}",
+				mp2_player_prop_get_metadata, player
+			);
 			break;
 		case repeat_one: break;
-		case single: {
-			pa_operation *op = pa_stream_cork(player->stream,
-				1, NULL, NULL);
-			pa_operation_unref(op);
-			break;
-		}
 		}
 		mtx_unlock(&player->lock);
 		reply_nothing(conn, msg);
@@ -629,178 +767,94 @@ DBusHandlerResult mp2_player_prop_get(
 	const char *property
 ) {
 	struct player *player = user_data;
-	struct playlist *pl = &player->pl;
 	mtx_lock(&player->lock);
-	track_i *track = pl->track[pl->curr];
-	track_state state = track->state(track);
-	const char *playback_status =
-		player_playback_status(player);
-	const char *loop_status =
-		player_loop_status(player);
-	double volume = pow(10, player->gain / 20);
-	dbus_int64_t position = state.time * 1e6;
-	mtx_unlock(&player->lock);
-
 	DBusMessage *reply = dbus_message_new_method_return(msg);
+	DBusMessageIter iter;
+	dbus_message_iter_init_append(reply, &iter);
 	if (!strcmp(property, "PlaybackStatus")) {
-		dbus_message_append_args(reply,
-			DBUS_TYPE_STRING, &playback_status,
-			DBUS_TYPE_INVALID
-		);
-		goto send_reply;
+		mp2_player_prop_get_playback_status(&iter, player);
 	}
-	if (!strcmp(property, "LoopStatus")) {
-		dbus_message_append_args(reply,
-			DBUS_TYPE_STRING, &loop_status,
-			DBUS_TYPE_INVALID
-		);
-		goto send_reply;
+	else if (!strcmp(property, "LoopStatus")) {
+		mp2_player_prop_get_loop_status(&iter, player);
 	}
-	// if (!strcmp(property, "Shuffle")) {
+	// else if (!strcmp(property, "Shuffle")) {
 	// 	dbus_message_append_args(reply,
 	// 		DBUS_TYPE_BOOLEAN, &mp2_player_props.Shuffle,
 	// 		DBUS_TYPE_INVALID
 	// 	);
 	// 	goto send_reply;
 	// }
-	if (!strcmp(property, "Volume")) {
-		dbus_message_append_args(reply,
-			DBUS_TYPE_DOUBLE, &volume,
-			DBUS_TYPE_INVALID
-		);
-		goto send_reply;
+	else if (!strcmp(property, "Volume")) {
+		mp2_player_prop_get_volume(&iter, player);
 	}
-	if (!strcmp(property, "Position")) {
-		dbus_message_append_args(reply,
-			DBUS_TYPE_INT64, &position,
-			DBUS_TYPE_INVALID
-		);
-		goto send_reply;
+	else if (!strcmp(property, "Position")) {
+		mp2_player_prop_get_position(&iter, player);
 	}
-	if (!strcmp(property, "Rate")) {
+	else if (!strcmp(property, "Rate")) {
 		dbus_message_append_args(reply,
 			DBUS_TYPE_DOUBLE, &mp2_player_props.Rate,
 			DBUS_TYPE_INVALID
 		);
-		goto send_reply;
 	}
-	if (!strcmp(property, "MinimumRate")) {
+	else if (!strcmp(property, "MinimumRate")) {
 		dbus_message_append_args(reply,
 			DBUS_TYPE_DOUBLE, &mp2_player_props.MinimumRate,
 			DBUS_TYPE_INVALID
 		);
-		goto send_reply;
 	}
-	if (!strcmp(property, "MaximumRate")) {
+	else if (!strcmp(property, "MaximumRate")) {
 		dbus_message_append_args(reply,
 			DBUS_TYPE_DOUBLE, &mp2_player_props.MaximumRate,
 			DBUS_TYPE_INVALID
 		);
-		goto send_reply;
 	}
-	if (!strcmp(property, "CanGoNext")) {
+	else if (!strcmp(property, "CanGoNext")) {
 		dbus_message_append_args(reply,
 			DBUS_TYPE_BOOLEAN, &mp2_player_props.CanGoNext,
 			DBUS_TYPE_INVALID
 		);
-		goto send_reply;
 	}
-	if (!strcmp(property, "CanGoPrevious")) {
+	else if (!strcmp(property, "CanGoPrevious")) {
 		dbus_message_append_args(reply,
 			DBUS_TYPE_BOOLEAN, &mp2_player_props.CanGoPrevious,
 			DBUS_TYPE_INVALID
 		);
-		goto send_reply;
 	}
-	if (!strcmp(property, "CanPlay")) {
+	else if (!strcmp(property, "CanPlay")) {
 		dbus_message_append_args(reply,
 			DBUS_TYPE_BOOLEAN, &mp2_player_props.CanPlay,
 			DBUS_TYPE_INVALID
 		);
-		goto send_reply;
 	}
-	if (!strcmp(property, "CanPause")) {
+	else if (!strcmp(property, "CanPause")) {
 		dbus_message_append_args(reply,
 			DBUS_TYPE_BOOLEAN, &mp2_player_props.CanPause,
 			DBUS_TYPE_INVALID
 		);
-		goto send_reply;
 	}
-	if (!strcmp(property, "CanSeek")) {
+	else if (!strcmp(property, "CanSeek")) {
 		dbus_message_append_args(reply,
 			DBUS_TYPE_BOOLEAN, &mp2_player_props.CanSeek,
 			DBUS_TYPE_INVALID
 		);
-		goto send_reply;
 	}
-	if (!strcmp(property, "CanControl")) {
+	else if (!strcmp(property, "CanControl")) {
 		dbus_message_append_args(reply,
 			DBUS_TYPE_BOOLEAN, &mp2_player_props.CanControl,
 			DBUS_TYPE_INVALID
 		);
-		goto send_reply;
 	}
-	if (!strcmp(property, "Metadata")) {
-		struct player *player = user_data;
-		struct playlist *pl = &player->pl;
-		mtx_lock(&player->lock);
-		track_i *track = pl->track[pl->curr];
-		track_meta meta = track->meta(track);
-		dbus_int64_t length = meta.length * 1e6;
-		mtx_unlock(&player->lock);
-
-		DBusMessageIter iter, dict;
-		dbus_message_iter_init_append(msg, &iter);
-		iter_init_dict(&iter, &dict);
-
-		char buf[] = "/org/mpris/MediaPlayer2/track/??????";
-		snprintf(buf, sizeof buf,
-			"/org/mpris/MediaPlayer2/track/%d", pl->curr);
-		const char *obj = buf;
-		iter_dict_append_basic(&dict,
-			"mpris:trackid", DBUS_TYPE_STRING, &obj);
-
-		iter_dict_append_basic(&dict,
-			"mpris:length", DBUS_TYPE_INT64, &length);
-		
-		if (meta.album) {
-			iter_dict_append_basic(&dict,
-				"xesam:album", DBUS_TYPE_STRING, &meta.album);
-		}
-		
-		if (meta.artist) {
-			DBusMessageIter entry, variant, array;
-			iter_dict_open_entry(&dict, &entry, &variant,
-				"xesam:artist", "as");
-			dbus_message_iter_open_container(&variant,
-				DBUS_TYPE_ARRAY, "s", &array);
-			dbus_message_iter_append_basic(&array,
-				DBUS_TYPE_STRING, &meta.artist);
-			dbus_message_iter_close_container(&variant, &array);
-			iter_dict_close_entry(&dict, &entry, &variant);
-		}
-		
-		if (meta.title) {
-			iter_dict_append_basic(&dict,
-				"xesam:title", DBUS_TYPE_STRING, &meta.title);
-		}
-		
-		if (meta.tracknumber) {
-			dbus_int32_t track_number = atoi(meta.tracknumber);
-			iter_dict_append_basic(&dict,
-				"xesam:trackNumber", DBUS_TYPE_INT32, &track_number);
-		}
-
-		iter_close_dict(&iter, &dict);
-		goto send_reply;
+	else if (!strcmp(property, "Metadata")) {
+		mp2_player_prop_get_metadata(&iter, player);
 	}
-	dbus_message_unref(reply);
-	reply = dbus_message_new_error(msg,
-		"org.mpris.MediaPlayer2.poppy.Error.InvalidProperty",
-		"Invalid property"
-	);
-	goto send_reply;
-send_reply:
+	else {
+		dbus_message_unref(reply);
+		reply = dbus_message_new_error(msg,
+			"org.mpris.MediaPlayer2.poppy.Error.InvalidProperty",
+			"Invalid property"
+		);
+	}
+	mtx_unlock(&player->lock);
 	dbus_connection_send(conn, reply, NULL);
 	dbus_message_unref(reply);
 	return DBUS_HANDLER_RESULT_HANDLED;
@@ -958,39 +1012,35 @@ DBusHandlerResult mp2_player_prop_getall(
 	void *user_data
 ) {
 	struct player *player = user_data;
-	struct playlist *pl = &player->pl;
 	mtx_lock(&player->lock);
-	track_i *track = pl->track[pl->curr];
-	track_state state = track->state(track);
-	track_meta meta = track->meta(track);
-	const char *playback_status =
-		player_playback_status(player);
-	const char *loop_status =
-		player_loop_status(player);
-	double volume = pow(10, player->gain / 20);
-	dbus_int64_t position = state.time * 1e6;
-	mtx_unlock(&player->lock);
-
 	DBusMessage *reply;
 	reply = dbus_message_new_method_return(msg);
 	DBusMessageIter iter, dict, entry, variant;
 	dbus_message_iter_init_append(reply, &iter);
 	iter_init_dict(&iter, &dict);
 
-	iter_dict_append_basic(&dict,
-		"PlaybackStatus", DBUS_TYPE_STRING, &playback_status);
+	iter_dict_append_callback(&dict,
+		"PlaybackStatus", "s",
+		mp2_player_prop_get_playback_status, player
+	);
 
-	iter_dict_append_basic(&dict,
-		"LoopStatus", DBUS_TYPE_STRING, &loop_status);
+	iter_dict_append_callback(&dict,
+		"LoopStatus", "s",
+		mp2_player_prop_get_loop_status, player
+	);
 
 	// iter_dict_append_basic(&dict,
 	// 	"Shuffle", DBUS_TYPE_BOOLEAN, &mp2_player_props.Shuffle);
 
-	iter_dict_append_basic(&dict,
-		"Volume", DBUS_TYPE_DOUBLE, &volume);
+	iter_dict_append_callback(&dict,
+		"Volume", "d",
+		mp2_player_prop_get_volume, player
+	);
 
-	iter_dict_append_basic(&dict,
-		"Position", DBUS_TYPE_INT64, &position);
+	iter_dict_append_callback(&dict,
+		"Position", "x",
+		mp2_player_prop_get_position, player
+	);
 
 	iter_dict_append_basic(&dict,
 		"Rate", DBUS_TYPE_DOUBLE, &mp2_player_props.Rate);
@@ -1019,55 +1069,13 @@ DBusHandlerResult mp2_player_prop_getall(
 	iter_dict_append_basic(&dict,
 		"CanControl", DBUS_TYPE_BOOLEAN, &mp2_player_props.CanControl);
 
-	iter_dict_open_entry(&dict, &entry, &variant, "Metadata", "a{sv}");
-	{
-		DBusMessageIter dict;
-		iter_init_dict(&variant, &dict);
-
-		char buf[] = "/org/mpris/MediaPlayer2/track/??????";
-		snprintf(buf, sizeof buf,
-			"/org/mpris/MediaPlayer2/track/%d", pl->curr);
-		const char *obj = buf;
-		iter_dict_append_basic(&dict,
-			"mpris:trackid", DBUS_TYPE_OBJECT_PATH, &obj);
-
-		dbus_int64_t length = meta.length * 1e6;
-		iter_dict_append_basic(&dict,
-			"mpris:length", DBUS_TYPE_INT64, &length);
-		
-		if (meta.album) {
-			iter_dict_append_basic(&dict,
-				"xesam:album", DBUS_TYPE_STRING, &meta.album);
-		}
-		
-		if (meta.artist) {
-			DBusMessageIter entry, variant, array;
-			iter_dict_open_entry(&dict, &entry, &variant,
-				"xesam:artist", "as");
-			dbus_message_iter_open_container(&variant,
-				DBUS_TYPE_ARRAY, "s", &array);
-			dbus_message_iter_append_basic(&array,
-				DBUS_TYPE_STRING, &meta.artist);
-			dbus_message_iter_close_container(&variant, &array);
-			iter_dict_close_entry(&dict, &entry, &variant);
-		}
-		
-		if (meta.title) {
-			iter_dict_append_basic(&dict,
-				"xesam:title", DBUS_TYPE_STRING, &meta.title);
-		}
-		
-		if (meta.tracknumber) {
-			dbus_int32_t track_number = atoi(meta.tracknumber);
-			iter_dict_append_basic(&dict,
-				"xesam:trackNumber", DBUS_TYPE_INT32, &track_number);
-		}
-
-		iter_close_dict(&variant, &dict);
-	}
-	iter_dict_close_entry(&dict, &entry, &variant);
+	iter_dict_append_callback(&dict,
+		"Metadata", "a{sv}",
+		mp2_player_prop_get_metadata, player
+	);
 
 	iter_close_dict(&iter, &dict);
+	mtx_unlock(&player->lock);
 	dbus_connection_send(conn, reply, NULL);
 	dbus_message_unref(reply);
 	return DBUS_HANDLER_RESULT_HANDLED;

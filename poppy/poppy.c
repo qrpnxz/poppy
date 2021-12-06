@@ -59,13 +59,13 @@ void play(pa_stream *stream, size_t bytes, void *userdata) {
 	track_i *track;
 	track_state state;
 	track_meta meta;
+	bool eot = false;
 cont:
 	while (bytes > 0) {
 		float *pcm;
 		size_t buf_bytes = bytes;
 		pa_stream_begin_write(stream, (void**) &pcm, &buf_bytes);
 		memset(pcm, 0, buf_bytes);
-		bool eot = false;
 		int s = buf_bytes / sizeof (float);
 		int spch = s / stream_channel_cnt;
 		int ts = 0;
@@ -93,7 +93,7 @@ cont:
 	track = pl->track[pl->curr];
 	state = track->state(track);
 	meta = track->meta(track);
-	if (state.time < meta.length) {
+	if (state.time < meta.length && !eot) {
 		mtx_unlock(&player->lock);
 		return;
 	}
@@ -198,12 +198,13 @@ int main(int argc, char **argv) {
 		free(tracks);
 		total_tracks += n;
 	}
+	if (total_tracks == 0) return 0;
 
 	struct player *player = calloc(1, sizeof *player);
 	mtx_init(&player->lock, mtx_plain);
 	struct playlist *pl = &player->pl;
-	pl->size  = total_tracks;
 	pl->track = all_tracks;
+	pl->size  = total_tracks;
 
 	pa_mainloop *loop = pa_mainloop_new();
 	pa_mainloop_api *api = pa_mainloop_get_api(loop);

@@ -402,7 +402,7 @@ int flac_track_from_file(
 		);
 	}
 	if (status != FLAC__STREAM_DECODER_INIT_STATUS_OK) {
-		abort(); //TODO: error
+		fprintf(stderr, "unable to init FLAC decoder\n");
 		return -1;
 	}
 

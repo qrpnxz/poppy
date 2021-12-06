@@ -190,7 +190,7 @@ int main(int argc, char **argv) {
 	for (int i = 1; i < argc; i++) {
 		track_i **tracks = NULL;
 		int n = tracks_from_file(&tracks, argv[i]);
-		if (n <= 0) abort(); //TODO: proper error
+		if (n <= 0) continue;
 		all_tracks = realloc(all_tracks,
 			(total_tracks+n) * sizeof *all_tracks);
 		memcpy(&all_tracks[total_tracks], tracks,

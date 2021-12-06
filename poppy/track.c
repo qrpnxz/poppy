@@ -39,6 +39,7 @@ int ogg_tracks_from_file(track_i ***tracks, const char *filename) {
 	}
 	track_i **ogg_tracks = NULL;
 	int num_tracks = 0;
+	int link = 0;
 	long link_start = 0;
 	ogg_sync_state oy;
 	ogg_sync_init(&oy);
@@ -47,7 +48,10 @@ int ogg_tracks_from_file(track_i ***tracks, const char *filename) {
 		char *buf = ogg_sync_buffer(&oy, 0x1000);
 		int n = fread(buf, 1, 0x1000, file);
 		if (ferror(file)) {
-			abort(); //TODO: ("read error");
+			fprintf(stderr, "error parsing ogg stream: %s\n",
+				filename);
+			if (ogg_tracks) free(ogg_tracks);
+			return -1;
 		}
 		ogg_sync_wrote(&oy, n);
 	}
@@ -55,17 +59,23 @@ int ogg_tracks_from_file(track_i ***tracks, const char *filename) {
 link:
 	ogg_stream_init(&os, ogg_page_serialno(&og));
 	if (ogg_stream_pagein(&os, &og)) {
-		abort(); //TODO: ("ogg stream error");
+		fprintf(stderr, "error parsing ogg stream: %s\n",
+			filename);
+		if (ogg_tracks) free(ogg_tracks);
+		return -1;
 	}
 	ogg_packet op;
 	if (ogg_stream_packetout(&os, &op) != 1) {
-		abort(); //TODO: ("ogg stream error");
+		fprintf(stderr, "error parsing ogg stream: %s\n",
+			filename);
+		if (ogg_tracks) free(ogg_tracks);
+		return -1;
 	}
 
 	const char magic_opus[] = "OpusHead\x01";
 	const char magic_vorbis[] = "\x01vorbis\0\0\0\0";
 	const char magic_flac[] = "\177FLAC\x01\0";
-	enum codec {opus, vorbis, flac} codec;
+	enum codec {unknown, opus, vorbis, flac} codec;
 	if (!memcmp(op.packet, magic_opus, sizeof magic_opus - 1)) {
 		//fprintf(stderr, "DEBUG: detected OPUS\n");
 		codec = opus;
@@ -79,7 +89,7 @@ link:
 		codec = flac;
 	}
 	else {
-		abort(); //TODO: ("unknown codec");
+		codec = unknown;
 	}
 
 	bool last_link = false;
@@ -92,7 +102,10 @@ link:
 				goto fin;
 			}
 			if (ferror(file)) {
-				abort(); //TODO: ("read error");
+				fprintf(stderr, "unable to read file: %s\n",
+					filename);
+				if (ogg_tracks) free(ogg_tracks);
+				return -1;
 			}
 			ogg_sync_wrote(&oy, n);
 		}
@@ -106,48 +119,57 @@ link:
 				goto fin;
 			}
 			if (ferror(file)) {
-				abort(); //TODO: ("read error");
+				fprintf(stderr, "unable to read file: %s\n",
+					filename);
+				if (ogg_tracks) free(ogg_tracks);
+				return -1;
 			}
 			ogg_sync_wrote(&oy, n);
 		}
 	} while (!ogg_page_bos(&og));
-	long link_end = -1;
+	long link_end;
 fin:
+	link_end = -1;
 	if (!last_link) {
 		long page_size = og.header_len + og.body_len;
 		long buffered  = oy.fill - oy.returned;
 		link_end = ftell(file) - (page_size + buffered);
-	} else if (link_start == 0) {
-		link_end = ftell(file);
 	}
 	switch (codec) {
 	case opus: {
 		opus_track *track = calloc(1, sizeof *track);
 		int ret = opus_track_from_file(track, filename, link_start, link_end);
-		if (ret < 0) abort(); //TODO: ("invalid OPUS");
-		ogg_tracks = realloc(ogg_tracks,
-			(num_tracks+1) * sizeof *ogg_tracks);
-		ogg_tracks[num_tracks++] = (track_i*) track;
+		if (ret == 0) {
+			ogg_tracks = realloc(ogg_tracks,
+				(num_tracks+1) * sizeof *ogg_tracks);
+			ogg_tracks[num_tracks++] = (track_i*) track;
+		}
 		break;
 	}
 	case vorbis: {
 		vorbis_track *track = calloc(1, sizeof *track);
 		int ret = vorbis_track_from_file(track, filename, link_start, link_end);
-		if (ret < 0) abort(); //TODO: ("invalid VORBIS");
-		ogg_tracks = realloc(ogg_tracks,
-			(num_tracks+1) * sizeof *ogg_tracks);
-		ogg_tracks[num_tracks++] = (track_i*) track;
+		if (ret == 0) {
+			ogg_tracks = realloc(ogg_tracks,
+				(num_tracks+1) * sizeof *ogg_tracks);
+			ogg_tracks[num_tracks++] = (track_i*) track;
+		}
 		break;
 	}
 	case flac: {
 		flac_track *track = calloc(1, sizeof *track);
 		int ret = flac_track_from_file(track, filename, true, link_start, link_end);
-		if (ret < 0) abort(); //TODO: ("invalid FLAC");
-		ogg_tracks = realloc(ogg_tracks,
-			(num_tracks+1) * sizeof *ogg_tracks);
-		ogg_tracks[num_tracks++] = (track_i*) track;
+		if (ret == 0) {
+			ogg_tracks = realloc(ogg_tracks,
+				(num_tracks+1) * sizeof *ogg_tracks);
+			ogg_tracks[num_tracks++] = (track_i*) track;
+		}
 		break;
 	}
+	default:
+		fprintf(stderr, "unknown codec in link: %d: %s\n",
+			link, filename);
+		break;
 	}
 	if (last_link) {
 		ogg_stream_clear(&os);
@@ -156,7 +178,8 @@ fin:
 		*tracks = ogg_tracks;
 		return num_tracks;
 	}
-	goto link; //TODO: commented to test the edge finding algo
+	link++;
+	goto link;
 }
 
 int tracks_from_file(
@@ -176,16 +199,20 @@ int tracks_from_file(
 		n += fread(head+n, 1, sizeof head, soundfile);
 		if (n >= sizeof head) break;
 		if (ferror(soundfile)) {
-			abort(); //TODO: ("read error");
+			fprintf(stderr, "unable to read file: %s\n", filename);
+			return -1;
 		}
 	}
-	if (tries >= 10) abort(); //TODO: ("no progress");
+	if (tries >= 10) {
+		fprintf(stderr, "no progress on file: %s\n", filename);
+		return -1;
+	}
 	if (!memcmp(head, "fLaC", 4)) {
 		//fprintf(stderr, "DEBUG: detected FLAC\n");
 		fclose(soundfile);
 		flac_track *track = calloc(1, sizeof *track);
 		int ret = flac_track_from_file(track, filename, false, 0, 0);
-		if (ret < 0) abort(); //TODO: ("invalid FLAC");
+		if (ret < 0) return ret;
 		*tracks = calloc(1, sizeof **tracks);
 		**tracks = (track_i*) track;
 		return 1;
@@ -194,6 +221,7 @@ int tracks_from_file(
 		fclose(soundfile);
 		return ogg_tracks_from_file(tracks, filename);
 	} else {
-		abort(); //TODO: unsupported
+		fprintf(stderr, "unsupported file: %s\n", filename);
+		return -1;
 	}
 }

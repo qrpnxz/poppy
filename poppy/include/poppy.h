@@ -23,6 +23,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 #include <threads.h>
 
 #include <pulse/pulseaudio.h>
+#include <dbus/dbus.h>
 
 #include "def.h"
 #include "track.h"
@@ -42,5 +43,6 @@ struct player {
 	enum gain_type gain_type;
 	enum play_mode play_mode;
 	pa_stream *stream;
+	DBusConnection *conn;
 	mtx_t lock;
 };

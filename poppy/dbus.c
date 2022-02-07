@@ -509,6 +509,17 @@ void mp2_player_prop_get_metadata(
 	iter_close_dict(iter, &dict);
 }
 
+void signal_metadata_update(
+	DBusConnection *conn,
+	struct player *player
+) {
+	signal_prop_change_one_callback(conn,
+		"org.mpris.MediaPlayer2.Player",
+		"Metadata", "a{sv}",
+		mp2_player_prop_get_metadata, player
+	);
+}
+
 DBusHandlerResult mp2_player_msg(
 	DBusConnection *conn,
 	DBusMessage *msg,
@@ -537,20 +548,12 @@ DBusHandlerResult mp2_player_msg(
 					DBUS_TYPE_STRING, &playback_status
 				);
 			}
-			signal_prop_change_one_callback(conn,
-				"org.mpris.MediaPlayer2.Player",
-				"Metadata", "a{sv}",
-				mp2_player_prop_get_metadata, player
-			);
+			signal_metadata_update(conn, player);
 			break;
 		case repeat:
 			pl->curr++;
 			pl->curr %= pl->size;
-			signal_prop_change_one_callback(conn,
-				"org.mpris.MediaPlayer2.Player",
-				"Metadata", "a{sv}",
-				mp2_player_prop_get_metadata, player
-			);
+			signal_metadata_update(conn, player);
 			break;
 		case repeat_one: break;
 		}
@@ -580,20 +583,12 @@ DBusHandlerResult mp2_player_msg(
 					DBUS_TYPE_STRING, &playback_status
 				);
 			}
-			signal_prop_change_one_callback(conn,
-				"org.mpris.MediaPlayer2.Player",
-				"Metadata", "a{sv}",
-				mp2_player_prop_get_metadata, player
-			);
+			signal_metadata_update(conn, player);
 			break;
 		case repeat:
 			pl->curr--;
 			pl->curr %= pl->size;
-			signal_prop_change_one_callback(conn,
-				"org.mpris.MediaPlayer2.Player",
-				"Metadata", "a{sv}",
-				mp2_player_prop_get_metadata, player
-			);
+			signal_metadata_update(conn, player);
 			break;
 		case repeat_one: break;
 		}
@@ -1209,6 +1204,7 @@ DBusObjectPathVTable mp2_vtable = (DBusObjectPathVTable) {
 
 int dbus_main(void *_player) {
 	struct player *player = _player;
+	dbus_threads_init_default();
 
 	DBusError dbuserr = {};
 	DBusConnection *conn =
@@ -1225,9 +1221,7 @@ int dbus_main(void *_player) {
 	int ret = dbus_bus_request_name(
 		conn,
 		"org.mpris.MediaPlayer2.poppy",
-		DBUS_NAME_FLAG_DO_NOT_QUEUE |
-		DBUS_NAME_FLAG_ALLOW_REPLACEMENT |
-		DBUS_NAME_FLAG_REPLACE_EXISTING,
+		DBUS_NAME_FLAG_DO_NOT_QUEUE,
 		&dbuserr
 	);
 	if (ret == -1) {
@@ -1277,7 +1271,10 @@ int dbus_main(void *_player) {
 		goto release_name;
 	}
 
-	while (dbus_connection_read_write_dispatch(conn, -1));
+	player->conn = conn;
+	while (!player->stream);
+
+	while (dbus_connection_read_write_dispatch(conn, 1));
 
 release_name:
 	dbus_bus_release_name(conn,

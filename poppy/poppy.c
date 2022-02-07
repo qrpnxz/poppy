@@ -102,9 +102,9 @@ cont:
 	case playlist:
 		pl->curr++;
 		if (pl->curr >= pl->size) {
-			api->quit(api, 0);
-			mtx_unlock(&player->lock);
-			return;
+			pl->curr = 0;
+			pa_operation *op = pa_stream_cork(stream, 1, NULL, NULL);
+			pa_operation_unref(op);
 		}
 		break;
 	case repeat:
@@ -112,10 +112,10 @@ cont:
 		pl->curr %= pl->size;
 		break;
 	case repeat_one: break;
-	case single:
-		api->quit(api, 0);
-		mtx_unlock(&player->lock);
-		return;
+	case single: {
+		pa_operation *op = pa_stream_cork(stream, 1, NULL, NULL);
+		pa_operation_unref(op);
+	}
 	}
 	mtx_unlock(&player->lock);
 	if (bytes > 0) goto cont;
@@ -149,7 +149,6 @@ void ctx_state_cb(pa_context *ctx, void *userdata) {
 		sud->api    = api;
 		sud->player = ud->player;
 		sud->player->stream = stream;
-		mtx_unlock(&sud->player->lock);
 		pa_stream_set_write_callback(stream, play, sud);
 		assert(pa_stream_connect_playback(stream, NULL, NULL, 0, NULL, NULL) == 0);
 		return;
@@ -202,7 +201,6 @@ int main(int argc, char **argv) {
 
 	struct player *player = calloc(1, sizeof *player);
 	mtx_init(&player->lock, mtx_plain);
-	mtx_lock(&player->lock);
 	struct playlist *pl = &player->pl;
 	pl->size  = total_tracks;
 	pl->track = all_tracks;
@@ -224,6 +222,7 @@ int main(int argc, char **argv) {
 	} else {
 		thrd_detach(dbus);
 	}
+	while (!player->conn);
 
 	int runret;
 	int curr_track = -1;
@@ -233,6 +232,7 @@ int main(int argc, char **argv) {
 		track_meta meta = track->meta(track);
 		if (curr_track != pl->curr) {
 			curr_track = pl->curr;
+			signal_metadata_update(player->conn, player);
 			fputc('\n', stdout);
 			printf(" Audio: %dch %dbit @ %gkhz @ %gkbps\n",
 				meta.channels,

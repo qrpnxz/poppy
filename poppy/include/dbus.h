@@ -20,3 +20,5 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 #pragma once
 
 int dbus_main(void*);
+
+void signal_metadata_update(DBusConnection*, struct player*);

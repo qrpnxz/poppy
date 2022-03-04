@@ -87,7 +87,11 @@ ninja uninstall
 
 # License
 
-Use of this work is governed by its [license](GPL-3.0.txt).
+[![GPLv3 logo]][GPLv3]
+
+Use of this work is governed by the [GNU General Public License, version 3 or later][license].
+
+- [GPL FAQ]
 
 
 
@@ -103,3 +107,8 @@ Use of this work is governed by its [license](GPL-3.0.txt).
 
 [playerctl]: https://github.com/altdesktop/playerctl (playerctl)
 [dbus-send]: https://dbus.freedesktop.org/doc/dbus-send.1.html (dbus-send)
+
+[GPLv3 logo]: https://www.gnu.org/graphics/gplv3-with-text-136x68.png
+[GPLv3]: https://www.gnu.org/licenses/gpl-3.0.html
+[license]: GPL-3.0.txt
+[GPL FAQ]: https://www.gnu.org/licenses/gpl-faq.html

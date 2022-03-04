@@ -19,28 +19,37 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 #pragma once
 
-#include <stdbool.h>
-#include <threads.h>
+#include <FLAC/stream_decoder.h>
+#include <speex/speex_resampler.h>
 
-#include <pulse/pulseaudio.h>
+typedef struct flac_stream {
+	FILE *file;
+	long index;
+	long length;
+} flac_stream;
 
-#include "def.h"
-#include "track.h"
+typedef struct flac_frame {
+	float *buffer;
+	int samples;
+	int consumed;
+} flac_frame;
 
-extern const int stream_sample_rate;
-extern const int stream_channel_cnt;
+typedef struct flac_track {
+	track_i track_i;
+	track_state state;
+	track_meta meta;
+	float album_gain;
+	float track_gain;
+	flac_stream stream;
+	FLAC__StreamDecoder *dec;
+	flac_frame frame;
+	SpeexResamplerState *resampler;
+} flac_track;
 
-struct playlist {
-	track_i **track;
-	int curr;
-	int size;
-};
-
-struct player {
-	struct playlist pl;
-	double gain;
-	enum gain_type gain_type;
-	enum play_mode play_mode;
-	pa_stream *stream;
-	mtx_t lock;
-};
+int flac_track_from_file(
+	flac_track *track,
+	const char *filename,
+	bool isogg,
+	long link_start,
+	long link_end
+);

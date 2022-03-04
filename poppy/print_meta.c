@@ -111,7 +111,7 @@ void print_metadata(OggOpusFile *opusfile) {
 
 	if ((value = opus_tags_query(tags, "artist", 0))) {
 		printf("Artist:\t%s", value);
-		for (int i = 1; (value = opus_tags_query(tags, "artist", 1)); i++) {
+		for (int i = 1; (value = opus_tags_query(tags, "artist", i)); i++) {
 			printf(", %s", value);
 		}
 		//for (int i = 1; i < op_tags_query_count(tags, "artist"); i++) {

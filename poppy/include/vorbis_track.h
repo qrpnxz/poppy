@@ -19,28 +19,36 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 #pragma once
 
-#include <stdbool.h>
-#include <threads.h>
+#include <vorbis/vorbisfile.h>
+#include <speex/speex_resampler.h>
 
-#include <pulse/pulseaudio.h>
+typedef struct vorbis_stream {
+	FILE *file;
+	long index;
+	long length;
+} vorbis_stream;
 
-#include "def.h"
-#include "track.h"
+typedef struct vorbis_frame {
+	float **pcm;
+	int samples;
+	int consumed;
+} vorbis_frame;
 
-extern const int stream_sample_rate;
-extern const int stream_channel_cnt;
+typedef struct vorbis_track {
+	track_i track_i;
+	track_state state;
+	track_meta meta;
+	float album_gain;
+	float track_gain;
+	vorbis_stream stream;
+	OggVorbis_File file;
+	vorbis_frame frame;
+	SpeexResamplerState *resampler;
+} vorbis_track;
 
-struct playlist {
-	track_i **track;
-	int curr;
-	int size;
-};
-
-struct player {
-	struct playlist pl;
-	double gain;
-	enum gain_type gain_type;
-	enum play_mode play_mode;
-	pa_stream *stream;
-	mtx_t lock;
-};
+int vorbis_track_from_file(
+	vorbis_track *track,
+	const char *filename,
+	long link_start,
+	long link_end
+);

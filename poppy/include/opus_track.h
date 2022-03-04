@@ -19,7 +19,25 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 #pragma once
 
-#include "signalsdef.h"
+#include <opusfile.h>
 
-void set_signal_handlers(void);
+typedef struct opus_stream {
+	FILE *file;
+	long index;
+	long length;
+} opus_stream;
 
+typedef struct opus_track {
+	track_i track_i;
+	track_state state;
+	track_meta meta;
+	opus_stream stream;
+	OggOpusFile *file;
+} opus_track;
+
+int opus_track_from_file(
+	opus_track *track,
+	const char *filename,
+	long link_start,
+	long link_end
+);

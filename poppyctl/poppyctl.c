@@ -27,7 +27,14 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 #include <unistd.h>
 #include <pwd.h>
 
-#include "signalsdef.h"
+#include "def.h"
+
+#define SIGSEEK     (SIGRTMIN)
+#define SIGSKIP     (SIGRTMIN+1)
+#define SIGGAIN     (SIGRTMIN+2)
+#define SIGGAINTYPE (SIGRTMIN+3)
+#define SIGABSGAIN  (SIGRTMIN+4)
+#define SIGPLAYMODE (SIGRTMIN+5)
 
 void print_help(const char *cmd) {
 	fprintf(stderr, "%s (stop|pause|play)\n", cmd);
@@ -148,12 +155,12 @@ int main(int argc, char *argv[]) {
 	}
 	if (!strcmp(argv[1], "gaintype")) {
 		val.sival_int =
-			  (argc-1 < 2)                   ? header
-			: (!strcmp(argv[2], "header"))   ? header
-			: (!strcmp(argv[2], "album"))    ? album
-			: (!strcmp(argv[2], "track"))    ? track
-			: (!strcmp(argv[2], "absolute")) ? absolute
-			: (!strcmp(argv[2], "abs"))      ? absolute
+			  (argc-1 < 2)                   ? header_gain
+			: (!strcmp(argv[2], "header"))   ? header_gain
+			: (!strcmp(argv[2], "album"))    ? album_gain
+			: (!strcmp(argv[2], "track"))    ? track_gain
+			: (!strcmp(argv[2], "absolute")) ? absolute_gain
+			: (!strcmp(argv[2], "abs"))      ? absolute_gain
 			: -1;
 		if (val.sival_int < 0) {
 			fputs("header album track absolute\n", stderr);

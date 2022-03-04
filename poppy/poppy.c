@@ -24,305 +24,247 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 #include <stdlib.h>
 #include <string.h>
 
+#include <assert.h>
+#include <threads.h>
+
 #include <unistd.h>
 
-#include <opusfile.h>
-#include <portaudio.h>
+#include <pulse/pulseaudio.h>
 
 #include "poppy.h"
-#include "signals.h"
-#include "print_meta.h"
-#include "pid.h"
+#include "def.h"
+#include "opus_error.h"
 
-OggOpusFile **chains = NULL;
-int chain_count = 0;
-int current_chain = 0;
-opus_int32 gain = 0;
-int gain_type = OP_HEADER_GAIN;
-enum play_mode play_mode = playlist;
+#include "track.h"
+#include "opus_track.h"
+#include "vorbis_track.h"
+#include "flac_track.h"
+#include "ch_map.h"
 
-const char *stropuserror(int err) {
-	static const char *table[] = {
-		[-OP_FALSE        ] = "OP_FALSE",
-		[-OP_EOF          ] = "OP_EOF",
-		[-OP_HOLE         ] = "OP_HOLE",
-		[-OP_EREAD        ] = "OP_EREAD",
-		[-OP_EFAULT       ] = "OP_EFAULT",
-		[-OP_EIMPL        ] = "OP_EIMPL",
-		[-OP_EINVAL       ] = "OP_EINVAL",
-		[-OP_ENOTFORMAT   ] = "OP_ENOTFORMAT",
-		[-OP_EBADHEADER   ] = "OP_EBADHEADER",
-		[-OP_EVERSION     ] = "OP_EVERSION",
-		[-OP_ENOTAUDIO    ] = "OP_ENOTAUDIO",
-		[-OP_EBADPACKET   ] = "OP_EBADPACKET",
-		[-OP_EBADLINK     ] = "OP_EBADLINK",
-		[-OP_ENOSEEK      ] = "OP_ENOSEEK",
-		[-OP_EBADTIMESTAMP] = "OP_EBADTIMESTAMP",
-	};
-	return table[-err];
+#include "dbus.h"
+
+const int stream_sample_rate = 48000;
+const int stream_channel_cnt = vorbis_8_1_surround;
+
+typedef struct stream_ud {
+	pa_mainloop_api *api;
+	struct player *player;
+} stream_ud;
+
+void play(pa_stream *stream, size_t bytes, void *userdata) {
+	stream_ud *ud = userdata;
+	pa_mainloop_api *api = ud->api;
+	struct player *player = ud->player;
+	struct playlist *pl   = &player->pl;
+	track_i *track;
+	track_state state;
+	track_meta meta;
+cont:
+	while (bytes > 0) {
+		float *pcm;
+		size_t buf_bytes = bytes;
+		pa_stream_begin_write(stream, (void**) &pcm, &buf_bytes);
+		memset(pcm, 0, buf_bytes);
+		bool eot = false;
+		int s = buf_bytes / sizeof (float);
+		int spch = s / stream_channel_cnt;
+		int ts = 0;
+		do {
+			mtx_lock(&player->lock);
+			track_i *track = pl->track[pl->curr];
+			track->gain(track, player->gain, SEEK_SET);
+			track->gain_type(track, player->gain_type);
+			int sd = track->dec(track, pcm+stream_channel_cnt*ts, spch-ts);
+			mtx_unlock(&player->lock);
+			if (sd < 0) api->quit(api, 1);
+			if (sd == 0) eot = true;
+			ts += sd;
+		} while (ts < spch && !eot);
+		pa_stream_write(
+			stream,
+			pcm, buf_bytes,
+			NULL,
+			0, PA_SEEK_RELATIVE
+		);
+		bytes -= buf_bytes;
+		if (eot) break;
+	}
+	mtx_lock(&player->lock);
+	track = pl->track[pl->curr];
+	state = track->state(track);
+	meta = track->meta(track);
+	if (state.time < meta.length) {
+		mtx_unlock(&player->lock);
+		return;
+	}
+	track->seek(track, 0, SEEK_SET);
+	switch (player->play_mode) {
+	case playlist:
+		pl->curr++;
+		if (pl->curr >= pl->size) {
+			api->quit(api, 0);
+			mtx_unlock(&player->lock);
+			return;
+		}
+		break;
+	case repeat:
+		pl->curr++;
+		pl->curr %= pl->size;
+		break;
+	case repeat_one: break;
+	case single:
+		api->quit(api, 0);
+		mtx_unlock(&player->lock);
+		return;
+	}
+	mtx_unlock(&player->lock);
+	if (bytes > 0) goto cont;
 }
 
-int play_opus(
-	const void *input,
-	void *output,
-	unsigned long frameCount,
-	const PaStreamCallbackTimeInfo *timeInfo,
-	PaStreamCallbackFlags statusFlags,
-	void *userData
-) {
-	(void) input;
-	(void) timeInfo;
-	(void) statusFlags;
-	float *pcm = output;
-	OggOpusFile *chain;
-chain:
-	if (current_chain >= chain_count) return paComplete;
-	chain = chains[current_chain];
-	op_set_gain_offset(chain, gain_type, gain);
-retry:
-	int pre_link = op_current_link(chain);
-	int ret = op_read_float_stereo(chain, pcm, 2*frameCount);
-	if (ret < 0) {
-		fprintf(stderr, "op_read_float_stereo: %s\n",
-			stropuserror(ret));
-		switch (ret) {
-		case OP_HOLE: case OP_EREAD: case OP_EBADPACKET:
-			goto retry;
-		case OP_EINVAL:
-			ret = op_test_open(chain);
-			fprintf(stderr, "op_test_open: %s\n",
-				stropuserror(ret));
-		default:
-			return paAbort;
-		}
+typedef struct ctx_ud {
+	pa_mainloop_api *api;
+	struct player *player;
+} ctx_ud;
+
+void ctx_state_cb(pa_context *ctx, void *userdata) {
+	ctx_ud *ud = userdata;
+	pa_mainloop_api *api = ud->api;
+	switch (pa_context_get_state(ctx)) {
+	case PA_CONTEXT_CONNECTING:   //puts("pa_context connecting"); return;
+	case PA_CONTEXT_AUTHORIZING:  //puts("pa_context authenticating"); return;
+	case PA_CONTEXT_SETTING_NAME: //puts("pa_context setting name"); return;
+		return;
+	case PA_CONTEXT_READY: {
+		//puts("pa_context ready");
+		pa_sample_spec spec = (pa_sample_spec) {
+			.format   = PA_SAMPLE_FLOAT32LE,
+			.rate     = stream_sample_rate,
+			.channels = stream_channel_cnt,
+		};
+		assert(pa_sample_spec_valid(&spec));
+		pa_stream *stream = pa_stream_new(
+			ctx, "Poppy", &spec, &vorbis_pa_ch_map[stream_channel_cnt]);
+		assert(stream != NULL);
+		stream_ud *sud = calloc(1, sizeof *sud);
+		sud->api    = api;
+		sud->player = ud->player;
+		sud->player->stream = stream;
+		mtx_unlock(&sud->player->lock);
+		pa_stream_set_write_callback(stream, play, sud);
+		assert(pa_stream_connect_playback(stream, NULL, NULL, 0, NULL, NULL) == 0);
+		return;
 	}
-	int post_link = op_current_link(chain);
-	ogg_int64_t pcm_tell  = op_pcm_tell(chain);
-	ogg_int64_t pcm_total = op_pcm_total(chain, -1);
-	if (post_link > pre_link || pcm_tell >= pcm_total) {
-		ogg_int64_t last_length;
-		switch (play_mode) {
-		case repeat_one:
-			last_length = op_pcm_total(chain, pre_link);
-			op_pcm_seek(chain, pcm_tell - last_length);
-			break;
-		case single:
-			return paComplete;
-		default: break;
-		}
-	}
-	if (pcm_tell >= pcm_total) {
-		switch (play_mode) {
-		case playlist:
-			op_pcm_seek(chain, 0);
-			current_chain++;
-			break;
-		case repeat:
-			op_pcm_seek(chain, 0);
-			current_chain++;
-			current_chain %= chain_count;
-			break;
-		default: break;
-		}
-	}
-	if (ret < frameCount) {
-		pcm += 2*ret;
-		frameCount -= ret;
-		goto chain;
-	}
-	return paContinue;
+	case PA_CONTEXT_TERMINATED: puts("pa_context terminated"); break;
+	case PA_CONTEXT_FAILED:     puts("pa_context failed"); break;
+	default: break;
+    }
+	pa_stream_unref(ud->player->stream);
+	free(ud);
+	api->quit(api, 0);
 }
 
-void print_playback_details(PaStream *stream) {
-	pid_t pid = getpid();
-	int prev_chain = -1, prev_link = -1;
-	const OpusTags *tags = NULL;
-	const char *tracknumber = NULL;
-	const char *tracktotal = NULL;
-	int paerr = 0;
-	while ((paerr = Pa_IsStreamActive(stream))) {
-		if (current_chain >= chain_count) continue;
+// void print_help(const char *cmd) {
+// 	fprintf(stderr, "%s [-h|-g|-a|-t|-b] <oggopus>+\n\n", cmd);
+// 	fprintf(stderr, "\t-h\tprint this message\n");
+// 	fprintf(stderr, "\t-g#\tset gain to # dB\n");
+// 	fprintf(stderr, "\t-a\tadd album gain\n");
+// 	fprintf(stderr, "\t-t\tadd track gain\n");
+// 	fprintf(stderr, "\t-b\tremove default gain\n");
+// }
 
-		OggOpusFile *chain = chains[current_chain];
-		int current_link = op_current_link(chain);
+// void parse_opt(const char *arg) {
+// 	int len = strlen(arg);
+// 	if (len < 2) return;
+// 	switch (arg[1]) {
+// 	default:
+// 	case 'h': print_help("poppy"); exit(0);
+// 	case 'g': gain = 256*strtof(&arg[2], NULL); break;
+// 	case 'a': gain_type = OP_ALBUM_GAIN; break;
+// 	case 't': gain_type = OP_TRACK_GAIN; break;
+// 	case 'b': gain_type = OP_ABSOLUTE_GAIN; break;
+// 	}
+// }
 
-		if (prev_chain != current_chain ||
-			prev_link != current_link) {
-			prev_chain = current_chain;
-			prev_link  = current_link;
-			tags = op_tags(chain, -1);
-			tracknumber = opus_tags_query(tags, "tracknumber", 0);
-			tracktotal  = opus_tags_query(tags, "tracktotal", 0);
+int main(int argc, char **argv) {
+	track_i **all_tracks = NULL;
+	int total_tracks = 0;
+	for (int i = 1; i < argc; i++) {
+		track_i **tracks = NULL;
+		int n = tracks_from_file(&tracks, argv[i]);
+		if (n <= 0) abort(); //TODO: proper error
+		all_tracks = realloc(all_tracks,
+			(total_tracks+n) * sizeof *all_tracks);
+		memcpy(&all_tracks[total_tracks], tracks,
+			n * sizeof *tracks);
+		free(tracks);
+		total_tracks += n;
+	}
 
-			puts("");
-			print_metadata(chain);
+	struct player *player = calloc(1, sizeof *player);
+	mtx_init(&player->lock, mtx_plain);
+	mtx_lock(&player->lock);
+	struct playlist *pl = &player->pl;
+	pl->size  = total_tracks;
+	pl->track = all_tracks;
+
+	pa_mainloop *loop = pa_mainloop_new();
+	pa_mainloop_api *api = pa_mainloop_get_api(loop);
+
+	pa_context *ctx = pa_context_new(api, "poppy");
+	ctx_ud *ud = calloc(1, sizeof *ud);
+	ud->api    = api;
+	ud->player = player;
+	pa_context_set_state_callback(ctx, ctx_state_cb, ud);
+	assert(pa_context_connect(ctx, NULL, 0, NULL) >= 0);
+
+	thrd_t dbus;
+	int ret = thrd_create(&dbus, dbus_main, player);
+	if (ret != thrd_success) {
+		fprintf(stderr, "unable to start dbus thread\n");
+	} else {
+		thrd_detach(dbus);
+	}
+
+	int runret;
+	int curr_track = -1;
+	while (pa_mainloop_iterate(loop, 1, &runret) >= 0) {
+		track_i *track = pl->track[pl->curr];
+		track_state state = track->state(track);
+		track_meta meta = track->meta(track);
+		if (curr_track != pl->curr) {
+			curr_track = pl->curr;
+			fputc('\n', stdout);
+			printf(" Audio: %dch %dbit @ %gkhz @ %gkbps\n",
+				meta.channels,
+				meta.bit_depth,
+				meta.sample_rate / 1e3,
+				meta.bit_rate / 1e3
+			);
+			if (meta.artist) printf("Artist: %s\n", meta.artist);
+			if (meta.album)  printf(" Album: %s\n", meta.album);
+			if (meta.title)  printf(" Title: %s\n", meta.title);
 		}
-
-		printf("\r%d ", pid);
-		printf("[%0*d/%d] ",
-			(int) log10(chain_count)+1,
-			current_chain+1,
-			chain_count);
-		int link_count = op_link_count(chain);
-		printf("[%0*d/%d] ",
-			(int) log10(link_count)+1,
-			current_link+1,
-			link_count);
-		if (tracknumber) {
-			printf("[%s", tracknumber);
-			if (tracktotal) printf("/%s", tracktotal);
-			fputs("] ", stdout);
+		fputc('\r', stdout);
+		if (meta.tracknumber) {
+			printf("%s", meta.tracknumber);
+			if (meta.tracktotal) printf("/%s ", meta.tracktotal);
+			else printf(" ");
 		}
-		double length = op_pcm_total(chain, current_link) / 48e3;
-		double offset = 0;
-		for (int i = 0; i < current_link; i++) {
-			offset += op_pcm_total(chain, i);
-		}
-		offset /= 48e3;
-		double now = op_pcm_tell(chain)/48e3 - offset;
-		double remaining = length - now;
+		double now = state.time;
+		double remaining = meta.length - now;
 		double min, sec;
 		sec = modf(now/60, &min)*60;
 		printf("[%02.0f:%05.2f/", min, sec);
-		sec = modf(length/60, &min)*60;
+		sec = modf(meta.length/60, &min)*60;
 		printf("%02.0f:%05.2f/", min, sec);
-		remaining = length - now;
+		remaining = meta.length - now;
 		sec = modf(remaining/60, &min)*60;
 		printf("%02.0f:%05.2f]", min, sec);
 		fflush(stdout);
-		Pa_Sleep(10);
 	}
-	if (paerr < 0) {
-		fprintf(stderr, "Pa_IsStreamActive: %d\n", paerr);
-		exit(1);
-	}
-}
+	fputc('\n', stdout);
 
-void print_help(const char *cmd) {
-	fprintf(stderr, "%s [-h|-g|-a|-t|-b] <oggopus>+\n\n", cmd);
-	fprintf(stderr, "\t-h\tprint this message\n");
-	fprintf(stderr, "\t-g#\tset gain to # dB\n");
-	fprintf(stderr, "\t-a\tadd album gain\n");
-	fprintf(stderr, "\t-t\tadd track gain\n");
-	fprintf(stderr, "\t-b\tremove default gain\n");
-}
-
-void parse_opt(const char *arg) {
-	int len = strlen(arg);
-	if (len < 2) return;
-	switch (arg[1]) {
-	default:
-	case 'h': print_help("poppy"); exit(0);
-	case 'g': gain = 256*strtof(&arg[2], NULL); break;
-	case 'a': gain_type = OP_ALBUM_GAIN; break;
-	case 't': gain_type = OP_TRACK_GAIN; break;
-	case 'b': gain_type = OP_ABSOLUTE_GAIN; break;
-	}
-}
-
-void open_playlist(int argc, char *argv[]) {
-	chain_count = argc-1;
-	chains = calloc(chain_count, sizeof *chains);
-	current_chain = 0;
-	int parsing_args = true;
-	for (int i = 1; i < argc; i++) {
-		if (parsing_args && argv[i][0] == '-') {
-			if (argv[i][1] == '-') {
-				parsing_args = false;
-			} else {
-				chain_count--;
-				parse_opt(argv[i]);
-			}
-			continue;
-		}
-		int operr;
-		OggOpusFile *chain = op_open_file(argv[i], &operr);
-		if (operr != 0) {
-			fprintf(stderr,
-				"op_open_file: %s: %s\n",
-				argv[i], stropuserror(operr));
-			exit(1);
-		}
-		chains[current_chain++] = chain;
-	}
-	current_chain = 0;
-}
-
-void exit_pa(void) {
-	PaError err = Pa_Terminate();
-	if (err != paNoError) {
-		fprintf(stderr,
-			"Error terminating portaudio: %s\n",
-			Pa_GetErrorText(err));
-	}
-}
-
-int main(int argc, char *argv[]) {
-	if (argc < 2) return 0;
-	set_signal_handlers();
-	open_playlist(argc, argv);
-
-	PaError paerr = Pa_Initialize();
-	if (paerr != paNoError) {
-		fprintf(stderr,
-			"Pa_Initialize: %s\n",
-			Pa_GetErrorText(paerr));
-		exit(1);
-	}
-	atexit(exit_pa);
-
-	fprintf(stderr,
-		"portaudio successfully initialized: %s\n",
-		Pa_GetVersionText());
-
-	PaStream *stream;
-	PaStreamParameters outParams = {
-		.device = Pa_GetDefaultInputDevice(),
-		.channelCount = 2,
-		.sampleFormat = paFloat32,
-		.suggestedLatency = 0.120,
-		.hostApiSpecificStreamInfo = NULL,
-	};
-	paerr = Pa_OpenStream(
-		&stream,
-		NULL,
-		&outParams,
-		48000,
-		48*outParams.channelCount,
-		paNoFlag,
-		play_opus,
-		NULL
-	);
-	if (paerr != paNoError) {
-		fprintf(stderr,
-			"Pa_OpenStream: %s\n",
-			Pa_GetErrorText(paerr));
-		exit(1);
-	}
-
-	paerr = Pa_StartStream(stream);
-	if (paerr != paNoError) {
-		fprintf(stderr,
-			"Pa_StartStream: %s\n",
-			Pa_GetErrorText(paerr));
-		exit(1);
-	}
-
-	write_pid_file();
-
-	print_playback_details(stream);
-
-	paerr = Pa_CloseStream(stream);
-	if (paerr != paNoError) {
-		fprintf(stderr,
-			"Pa_CloseStream: %s\n",
-			Pa_GetErrorText(paerr));
-		exit(1);
-	}
-
-	for (int i = 0; i < chain_count; i++) {
-		op_free(chains[i]);
-	}
-	free(chains);
-	exit(0);
+	pa_context_unref(ctx);
+	pa_mainloop_free(loop);
+	return runret;
 }

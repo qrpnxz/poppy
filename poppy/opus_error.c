@@ -17,30 +17,25 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 */
 
-#pragma once
+#include <opusfile.h>
 
-#include <stdbool.h>
-#include <threads.h>
-
-#include <pulse/pulseaudio.h>
-
-#include "def.h"
-#include "track.h"
-
-extern const int stream_sample_rate;
-extern const int stream_channel_cnt;
-
-struct playlist {
-	track_i **track;
-	int curr;
-	int size;
-};
-
-struct player {
-	struct playlist pl;
-	double gain;
-	enum gain_type gain_type;
-	enum play_mode play_mode;
-	pa_stream *stream;
-	mtx_t lock;
-};
+const char *stropuserror(int err) {
+	static const char *table[] = {
+		[-OP_FALSE        ] = "OP_FALSE",
+		[-OP_EOF          ] = "OP_EOF",
+		[-OP_HOLE         ] = "OP_HOLE",
+		[-OP_EREAD        ] = "OP_EREAD",
+		[-OP_EFAULT       ] = "OP_EFAULT",
+		[-OP_EIMPL        ] = "OP_EIMPL",
+		[-OP_EINVAL       ] = "OP_EINVAL",
+		[-OP_ENOTFORMAT   ] = "OP_ENOTFORMAT",
+		[-OP_EBADHEADER   ] = "OP_EBADHEADER",
+		[-OP_EVERSION     ] = "OP_EVERSION",
+		[-OP_ENOTAUDIO    ] = "OP_ENOTAUDIO",
+		[-OP_EBADPACKET   ] = "OP_EBADPACKET",
+		[-OP_EBADLINK     ] = "OP_EBADLINK",
+		[-OP_ENOSEEK      ] = "OP_ENOSEEK",
+		[-OP_EBADTIMESTAMP] = "OP_EBADTIMESTAMP",
+	};
+	return table[-err];
+}

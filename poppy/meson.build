@@ -17,22 +17,27 @@
 
 poppy_source = files(
 	'poppy.c',
-	'signals.c',
-	'print_meta.c',
-	'pid.c',
+	'opus_error.c',
+	'track.c',
+	'opus_track.c',
+	'vorbis_track.c',
+	'flac_track.c',
+	'dbus.c',
 )
 poppy_include = [
 	include_directories('include'),
-	include_directories('/usr/include/opus'),
 ]
 poppy_deps = [
 	cc.find_library('m', required : false),
 	dependency('threads'),
-	declare_dependency(
-		link_args : '-lportaudio',
-	),
+	dependency('libpulse'),
+	dependency('ogg'),
 	dependency('opus'),
 	dependency('opusfile'),
+	dependency('vorbisfile'),
+	dependency('flac'),
+	dependency('speexdsp'),
+	dependency('dbus-1'),
 ]
 executable(
 	'poppy',

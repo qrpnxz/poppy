@@ -19,28 +19,4 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 #pragma once
 
-#include <stdbool.h>
-#include <threads.h>
-
-#include <pulse/pulseaudio.h>
-
-#include "def.h"
-#include "track.h"
-
-extern const int stream_sample_rate;
-extern const int stream_channel_cnt;
-
-struct playlist {
-	track_i **track;
-	int curr;
-	int size;
-};
-
-struct player {
-	struct playlist pl;
-	double gain;
-	enum gain_type gain_type;
-	enum play_mode play_mode;
-	pa_stream *stream;
-	mtx_t lock;
-};
+const char *stropuserror(int err);

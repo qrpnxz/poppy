@@ -20,10 +20,10 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 #pragma once
 
 enum gain_type {
-        header,
-        album,
-        track,
-        absolute,
+        header_gain,
+        album_gain,
+        track_gain,
+        absolute_gain,
 };
 
 enum play_mode {
@@ -32,11 +32,3 @@ enum play_mode {
         repeat_one,
         single,
 };
-
-#define SIGSEEK     (SIGRTMIN)
-#define SIGSKIP     (SIGRTMIN+1)
-#define SIGGAIN     (SIGRTMIN+2)
-#define SIGGAINTYPE (SIGRTMIN+3)
-#define SIGABSGAIN  (SIGRTMIN+4)
-#define SIGPLAYMODE (SIGRTMIN+5)
-
